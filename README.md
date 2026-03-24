@@ -17,6 +17,9 @@
 
 Lower is better. **Bold** = best result.
 
+> **Normalization:** Both predictions and labels are normalized before computing WER — lowercased, diacritics removed, and numbers converted to spoken form.
+
+
 | Model | Params | tele-medium | tele-diff-north | tele-diff-middle | tele-diff-south | MultiMED | VietMed | vlsp-2020-task1 | vlsp-2020-task2 | LSVSC | Fleurs | ViMD | vivos |
 |-------|--------|:-----------:|:---------------:|:----------------:|:---------------:|:--------:|:-------:|:-------:|:-------:|:-----:|:------:|:----:|:-----:|
 | vinai/PhoWhisper-small | 244M | 33.96 | 55.88 | 65.41 | 62.35 | 26.02 | 25.50 | 15.99 | 34.20 | 11.23 | 16.11 | 14.09 | 6.23 |
@@ -65,6 +68,8 @@ Call center ASR is one of the most challenging real-world domains — noisy phon
 ## Quick Start
 
 ### Installation
+
+> **Hardware:** All experiments were conducted on an NVIDIA RTX 4090.
 
 ```bash
 # Python 3.8+ required
