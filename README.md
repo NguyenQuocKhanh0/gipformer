@@ -1,6 +1,7 @@
 # Gipformer - Efficient Vietnamese Speech Recognition
 
 [![HuggingFace](https://img.shields.io/badge/HuggingFace-gipformer--65M--rnnt-blue)](https://huggingface.co/g-group-ai-lab/gipformer-65M-rnnt)
+[![ClawHub](https://img.shields.io/badge/ClawHub-gipformer-blue)](https://clawhub.ai/ai-ggroup/gipformer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
