@@ -228,8 +228,8 @@ def flush_consistency_batch(
                     f.write(t_a.strip())
         else:
             print(f"❌ Không đồng nhất: {item['path']}")
-            print(f"   - Model A: {t_a}")
-            print(f"   - Model B: {t_b}")
+            print(f"   - Model A: {t_a.strip().lower()}")
+            print(f"   - Model B: {t_b.strip().lower()}")
 
     # dọn file tạm sau khi infer xong batch
     for item in batch_items:
