@@ -226,6 +226,10 @@ def flush_consistency_batch(
                 )
                 with open(txt_path, "w", encoding="utf-8") as f:
                     f.write(t_a.strip())
+        else:
+            print(f"❌ Không đồng nhất: {item['path']}")
+            print(f"   - Model A: {t_a}")
+            print(f"   - Model B: {t_b}")
 
     # dọn file tạm sau khi infer xong batch
     for item in batch_items:
