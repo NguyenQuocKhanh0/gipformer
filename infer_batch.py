@@ -8,7 +8,8 @@ from typing import Dict, List, Optional
 from chunkformer import ChunkFormerModel
 import numpy as np
 import soundfile as sf
-
+import tempfile
+import uuid
 try:
     import sherpa_onnx
 except ImportError:
@@ -78,18 +79,23 @@ def resample_to_target_sr(
     return np.ascontiguousarray(out, dtype=np.float32)
 
 
-def preprocess_audio(audio_path: str) -> Dict:
+def preprocess_audio(audio_path: str, temp_dir: str) -> Dict:
     samples, sample_rate = read_audio(audio_path)
     samples = resample_to_target_sr(samples, sample_rate, SAMPLE_RATE)
 
+    temp_name = f"{uuid.uuid4().hex}.wav"
+    temp_path = os.path.join(temp_dir, temp_name)
+
+    sf.write(temp_path, samples, SAMPLE_RATE)
+
     return {
-        "path": audio_path,
+        "path": audio_path,                      # file gốc
         "name": os.path.basename(audio_path),
-        "samples": samples,
+        "samples": samples,                     # cho sherpa-onnx
         "sample_rate": SAMPLE_RATE,
         "duration": len(samples) / SAMPLE_RATE if len(samples) > 0 else 0.0,
+        "temp_wav_path": temp_path,             # cho chunkformer
     }
-
 
 def download_model(repo_id: str, quantize: str = "fp32") -> dict:
     if quantize not in ONNX_FILES:
@@ -192,12 +198,18 @@ def flush_consistency_batch(
     if not batch_items:
         return 0
 
+    # sherpa-onnx: dùng samples preload sẵn
     texts_a = model_a.decode_preloaded_batch(batch_items)
-    texts_b = model_b.batch_decode(batch_items,
-                                    chunk_size=64,
-                                    left_context_size=128,
-                                    right_context_size=128,
-                                    total_batch_duration=600,)
+
+    # chunkformer: dùng list path wav 16k đã preprocess
+    chunkformer_paths = [item["temp_wav_path"] for item in batch_items]
+    texts_b = model_b.batch_decode(
+        audio_paths=chunkformer_paths,
+        chunk_size=64,
+        left_context_size=128,
+        right_context_size=128,
+        total_batch_duration=600,
+    )
 
     kept = 0
     for item, t_a, t_b in zip(batch_items, texts_a, texts_b):
@@ -214,6 +226,15 @@ def flush_consistency_batch(
                 )
                 with open(txt_path, "w", encoding="utf-8") as f:
                     f.write(t_a.strip())
+
+    # dọn file tạm sau khi infer xong batch
+    for item in batch_items:
+        temp_path = item.get("temp_wav_path")
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     return kept
 
