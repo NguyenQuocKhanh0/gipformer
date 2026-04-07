@@ -238,163 +238,166 @@ def flush_consistency_batch(
 
     return kept
 
-
 def keep_consistent_asr_parallel(
     audio_dir: str,
     output_dir: str,
     save_txt: bool = True,
-    provider: str = "cpu",          # "cuda" nếu sherpa-onnx GPU hoạt động
-    preprocess_workers: int = 8,    # số worker đọc + resample
-    model_num_threads: int = 4,     # num_threads của mỗi recognizer
-    infer_batch_size: int = 8,      # số mẫu / batch infer
-    infer_max_batch_seconds: float = 120.0,  # tổng thời lượng tối đa / batch
-    max_in_flight: int = 32,        # số file preprocess song song tối đa
-    flush_timeout: float = 0.3,     # batch chưa đầy nhưng chờ quá lâu thì infer luôn
+    provider: str = "cpu",
+    preprocess_workers: int = 8,
+    model_num_threads: int = 4,
+    infer_batch_size: int = 8,
+    infer_max_batch_seconds: float = 120.0,
+    max_in_flight: int = 32,
+    flush_timeout: float = 0.3,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    audio_files = sorted(
-        f for f in os.listdir(audio_dir)
-        if f.lower().endswith(".wav")
-    )
-    if not audio_files:
-        raise ValueError("Không có file wav")
+    temp_dir = tempfile.mkdtemp(prefix="asr_16k_")
 
-    audio_paths = [os.path.join(audio_dir, f) for f in audio_files]
-    total = len(audio_paths)
-
-    print(f"📦 Tổng số file: {total}")
-    print(f"⚙️  preprocess_workers={preprocess_workers}, max_in_flight={max_in_flight}")
-    print(f"🧠 infer_batch_size={infer_batch_size}, infer_max_batch_seconds={infer_max_batch_seconds}")
-    print(f"🚀 provider={provider}, model_num_threads={model_num_threads}")
-
-    # Tạo 2 model để so sánh consistency
-    model_a = GipformerOnnxModel.from_pretrained(
-        repo_id=DEFAULT_REPO_ID,
-        quantize="fp32",
-        num_threads=model_num_threads,
-        decoding_method="modified_beam_search",
-        provider=provider,
-    )
-
-    model_b = ChunkFormerModel.from_pretrained(
-        "khanhld/chunkformer-rnnt-large-vie"
-    ).to(provider)
-
-    kept = 0
-    processed = 0
-    next_submit_idx = 0
-
-    ready_batch: List[Dict] = []
-    ready_batch_duration = 0.0
-    ready_batch_open_time: Optional[float] = None
-
-    start_time = time.time()
-
-    def should_flush() -> bool:
-        if not ready_batch:
-            return False
-        if len(ready_batch) >= infer_batch_size:
-            return True
-        if ready_batch_duration >= infer_max_batch_seconds:
-            return True
-        if ready_batch_open_time is not None and (time.time() - ready_batch_open_time) >= flush_timeout:
-            return True
-        return False
-
-    def flush_ready_batch():
-        nonlocal kept, processed, ready_batch, ready_batch_duration, ready_batch_open_time
-        if not ready_batch:
-            return
-
-        batch_kept = flush_consistency_batch(
-            batch_items=ready_batch,
-            model_a=model_a,
-            model_b=model_b,
-            output_dir=output_dir,
-            save_txt=save_txt,
+    try:
+        audio_files = sorted(
+            f for f in os.listdir(audio_dir)
+            if f.lower().endswith(".wav")
         )
-        kept += batch_kept
-        processed += len(ready_batch)
+        if not audio_files:
+            raise ValueError("Không có file wav")
 
-        print(
-            f"Processed {processed}/{total} | "
-            f"batch={len(ready_batch)} | "
-            f"kept={kept}"
+        audio_paths = [os.path.join(audio_dir, f) for f in audio_files]
+        total = len(audio_paths)
+
+        print(f"📦 Tổng số file: {total}")
+        print(f"⚙️ preprocess_workers={preprocess_workers}, max_in_flight={max_in_flight}")
+        print(f"🧠 infer_batch_size={infer_batch_size}, infer_max_batch_seconds={infer_max_batch_seconds}")
+        print(f"🚀 provider={provider}, model_num_threads={model_num_threads}")
+
+        model_a = GipformerOnnxModel.from_pretrained(
+            repo_id=DEFAULT_REPO_ID,
+            quantize="fp32",
+            num_threads=model_num_threads,
+            decoding_method="modified_beam_search",
+            provider=provider,
         )
 
-        ready_batch = []
+        model_b = ChunkFormerModel.from_pretrained(
+            "khanhld/chunkformer-rnnt-large-vie"
+        ).to(provider)
+
+        kept = 0
+        processed = 0
+        next_submit_idx = 0
+
+        ready_batch: List[Dict] = []
         ready_batch_duration = 0.0
-        ready_batch_open_time = None
+        ready_batch_open_time: Optional[float] = None
 
-    with ThreadPoolExecutor(max_workers=preprocess_workers) as ex:
-        pending = {}
+        start_time = time.time()
 
-        # nạp trước một lượng task
-        initial = min(max_in_flight, total)
-        for _ in range(initial):
-            path = audio_paths[next_submit_idx]
-            fut = ex.submit(preprocess_audio, path)
-            pending[fut] = path
-            next_submit_idx += 1
+        def should_flush() -> bool:
+            if not ready_batch:
+                return False
+            if len(ready_batch) >= infer_batch_size:
+                return True
+            if ready_batch_duration >= infer_max_batch_seconds:
+                return True
+            if (
+                ready_batch_open_time is not None
+                and (time.time() - ready_batch_open_time) >= flush_timeout
+            ):
+                return True
+            return False
 
-        while pending:
-            done, _ = wait(
-                pending.keys(),
-                timeout=0.1,
-                return_when=FIRST_COMPLETED,
+        def flush_ready_batch():
+            nonlocal kept, processed, ready_batch, ready_batch_duration, ready_batch_open_time
+            if not ready_batch:
+                return
+
+            batch_kept = flush_consistency_batch(
+                batch_items=ready_batch,
+                model_a=model_a,
+                model_b=model_b,
+                output_dir=output_dir,
+                save_txt=save_txt,
+            )
+            kept += batch_kept
+            processed += len(ready_batch)
+
+            print(
+                f"Processed {processed}/{total} | "
+                f"batch={len(ready_batch)} | "
+                f"kept={kept}"
             )
 
-            if not done:
-                if should_flush():
-                    flush_ready_batch()
-                continue
+            ready_batch = []
+            ready_batch_duration = 0.0
+            ready_batch_open_time = None
 
-            for fut in done:
-                src_path = pending.pop(fut)
+        with ThreadPoolExecutor(max_workers=preprocess_workers) as ex:
+            pending = {}
 
-                try:
-                    item = fut.result()
-                except Exception as e:
-                    processed += 1
-                    print(f"❌ Lỗi preprocess {src_path}: {e}")
-                    # vẫn nạp tiếp task mới
-                    if next_submit_idx < total:
-                        path = audio_paths[next_submit_idx]
-                        nf = ex.submit(preprocess_audio, path)
-                        pending[nf] = path
-                        next_submit_idx += 1
+            initial = min(max_in_flight, total)
+            for _ in range(initial):
+                path = audio_paths[next_submit_idx]
+                fut = ex.submit(preprocess_audio, path, temp_dir)
+                pending[fut] = path
+                next_submit_idx += 1
+
+            while pending:
+                done, _ = wait(
+                    pending.keys(),
+                    timeout=0.1,
+                    return_when=FIRST_COMPLETED,
+                )
+
+                if not done:
+                    if should_flush():
+                        flush_ready_batch()
                     continue
 
-                if not ready_batch:
-                    ready_batch_open_time = time.time()
+                for fut in done:
+                    src_path = pending.pop(fut)
 
-                ready_batch.append(item)
-                ready_batch_duration += item["duration"]
+                    try:
+                        item = fut.result()
+                    except Exception as e:
+                        processed += 1
+                        print(f"❌ Lỗi preprocess {src_path}: {e}")
 
-                # nạp tiếp để luôn giữ pipeline đầy
-                if next_submit_idx < total:
-                    path = audio_paths[next_submit_idx]
-                    nf = ex.submit(preprocess_audio, path)
-                    pending[nf] = path
-                    next_submit_idx += 1
+                        if next_submit_idx < total:
+                            path = audio_paths[next_submit_idx]
+                            nf = ex.submit(preprocess_audio, path, temp_dir)
+                            pending[nf] = path
+                            next_submit_idx += 1
+                        continue
 
-            if should_flush():
-                flush_ready_batch()
+                    if not ready_batch:
+                        ready_batch_open_time = time.time()
 
-        # flush phần còn lại
-        flush_ready_batch()
+                    ready_batch.append(item)
+                    ready_batch_duration += item["duration"]
 
-    elapsed = time.time() - start_time
-    kept_ratio = (kept / total * 100.0) if total > 0 else 0.0
+                    if next_submit_idx < total:
+                        path = audio_paths[next_submit_idx]
+                        nf = ex.submit(preprocess_audio, path, temp_dir)
+                        pending[nf] = path
+                        next_submit_idx += 1
 
-    print(f"\n📊 Tổng audio: {total}")
-    print(f"✅ Audio đồng nhất: {kept}")
-    print(f"📉 Tỉ lệ giữ lại: {kept_ratio:.2f}%")
-    print(f"⏱️  Tổng thời gian: {elapsed:.2f}s")
+                if should_flush():
+                    flush_ready_batch()
 
-    return kept
+            flush_ready_batch()
 
+        elapsed = time.time() - start_time
+        kept_ratio = (kept / total * 100.0) if total > 0 else 0.0
+
+        print(f"\n📊 Tổng audio: {total}")
+        print(f"✅ Audio đồng nhất: {kept}")
+        print(f"📉 Tỉ lệ giữ lại: {kept_ratio:.2f}%")
+        print(f"⏱️ Tổng thời gian: {elapsed:.2f}s")
+
+        return kept
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     keep_consistent_asr_parallel(
