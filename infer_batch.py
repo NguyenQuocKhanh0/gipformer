@@ -213,7 +213,7 @@ def flush_consistency_batch(
 
     kept = 0
     for item, t_a, t_b in zip(batch_items, texts_a, texts_b):
-        if t_a.strip() == t_b.strip():
+        if t_a.strip().lower() == t_b.strip().lower():
             kept += 1
             src_audio = item["path"]
             dst_audio = os.path.join(output_dir, item["name"])
@@ -404,7 +404,7 @@ if __name__ == "__main__":
         audio_dir="data",
         output_dir="audio_kept",
         save_txt=True,
-        provider="cpu",          # đổi thành "cuda" nếu bản sherpa-onnx GPU đã setup đúng
+        provider="cuda",          # đổi thành "cuda" nếu bản sherpa-onnx GPU đã setup đúng
         preprocess_workers=8,
         model_num_threads=4,
         infer_batch_size=8,
