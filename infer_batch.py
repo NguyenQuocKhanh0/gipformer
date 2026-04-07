@@ -276,7 +276,7 @@ def keep_consistent_asr_parallel(
 
         model_a = GipformerOnnxModel.from_pretrained(
             repo_id=DEFAULT_REPO_ID,
-            quantize="fp32",
+            quantize="int8",
             num_threads=model_num_threads,
             decoding_method="modified_beam_search",
             provider=provider,
@@ -408,7 +408,7 @@ if __name__ == "__main__":
         audio_dir="data",
         output_dir="audio_kept",
         save_txt=True,
-        provider="cpu",          # đổi thành "cuda" nếu bản sherpa-onnx GPU đã setup đúng
+        provider="cuda",          # đổi thành "cuda" nếu bản sherpa-onnx GPU đã setup đúng
         preprocess_workers=8,
         model_num_threads=4,
         infer_batch_size=8,
