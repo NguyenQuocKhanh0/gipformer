@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fractions import Fraction
 from typing import Dict, List, Optional
-from chunkformer import ChunkFormerModel
+# from chunkformer import ChunkFormerModel
 import numpy as np
 import soundfile as sf
 import tempfile
