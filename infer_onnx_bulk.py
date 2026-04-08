@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """
-Fast bulk Gipformer ONNX inference for very large audio directories.
+Sequential Gipformer ONNX inference for very large audio folders.
 
-Output JSONL format:
-{"wav":"file1.wav","text":"..."}
-{"wav":"file2.wav","text":"..."}
-
-Optimizations:
-- Minimal output fields
-- Faster directory scan with os.scandir
-- Lightweight queues/items
-- Keep one recognizer hot
-- Batched decode_streams()
-- Optional resume from existing JSONL
+- Process one file at a time
+- Stable for huge directories
+- Output JSONL only: wav, text
+- Supports resume
 """
 
 from __future__ import annotations
@@ -21,12 +14,10 @@ import argparse
 import json
 import math
 import os
-import queue
 import sys
-import threading
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 import numpy as np
 import soundfile as sf
@@ -66,8 +57,6 @@ ONNX_FILES = {
     },
 }
 
-_SENTINEL = object()
-
 
 def positive_int(value: str) -> int:
     v = int(value)
@@ -85,12 +74,9 @@ def non_negative_int(value: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     cpu_count = os.cpu_count() or 4
-    default_read_workers = min(8, max(2, cpu_count // 4))
-    default_batch_size = 16
-    default_loaded_queue = max(default_batch_size * 8, default_read_workers * 16)
 
     parser = argparse.ArgumentParser(
-        description="Fast bulk Gipformer ONNX inference for huge audio collections",
+        description="Sequential Gipformer ONNX inference for large audio folders",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -110,8 +96,8 @@ def parse_args() -> argparse.Namespace:
         "--sort",
         type=str,
         choices=["none", "size_asc", "size_desc"],
-        default="size_asc",
-        help="Sort files by size to improve batching",
+        default="none",
+        help="Sort files by size",
     )
 
     model = parser.add_argument_group("Model")
@@ -121,10 +107,12 @@ def parse_args() -> argparse.Namespace:
     model.add_argument("--local-files-only", action="store_true")
 
     infer = parser.add_argument_group("Inference")
-    infer.add_argument("--batch-size", type=positive_int, default=default_batch_size)
-    infer.add_argument("--max-wait-ms", type=float, default=20.0)
-    infer.add_argument("--num-threads", type=non_negative_int, default=0)
-    infer.add_argument("--read-workers", type=non_negative_int, default=default_read_workers)
+    infer.add_argument(
+        "--num-threads",
+        type=non_negative_int,
+        default=max(1, cpu_count - 1),
+        help="Recognizer CPU threads",
+    )
     infer.add_argument(
         "--decoding-method",
         choices=["greedy_search", "modified_beam_search"],
@@ -132,29 +120,18 @@ def parse_args() -> argparse.Namespace:
     )
     infer.add_argument("--max-active-paths", type=positive_int, default=4)
     infer.add_argument("--allow-resample", action="store_true")
-    infer.add_argument("--loaded-queue-size", type=positive_int, default=default_loaded_queue)
 
     out = parser.add_argument_group("Output")
     out.add_argument("--output", type=str, default="results.jsonl")
     out.add_argument("--resume", action="store_true")
-    out.add_argument("--flush-every", type=positive_int, default=100)
-    out.add_argument("--progress-every", type=positive_int, default=100)
+    out.add_argument("--flush-every", type=positive_int, default=1)
+    out.add_argument("--progress-every", type=positive_int, default=10)
     out.add_argument("--quiet", action="store_true")
 
     args = parser.parse_args()
 
     if not args.audio and not args.audio_dir and not args.manifest:
         parser.error("Provide at least one of --audio, --audio-dir, or --manifest")
-
-    if args.read_workers == 0:
-        args.read_workers = default_read_workers
-
-    if args.num_threads == 0:
-        reserve = 1
-        args.num_threads = max(1, cpu_count - args.read_workers - reserve)
-
-    if args.max_wait_ms < 0:
-        parser.error("--max-wait-ms must be >= 0")
 
     return args
 
@@ -212,7 +189,6 @@ def discover_files(args: argparse.Namespace) -> list[str]:
         exts = set(normalize_extensions(args.extensions))
         paths.extend(iter_files_scandir(args.audio_dir, args.recursive, exts))
 
-    # deduplicate while preserving order
     paths = list(dict.fromkeys(paths))
 
     if args.sort != "none":
@@ -297,33 +273,31 @@ def resample_audio(samples: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     old_len = len(samples)
     if old_len == 0:
         return samples.astype(np.float32, copy=False)
+
     new_len = int(round(old_len * dst_sr / src_sr))
     if new_len <= 1:
         return np.ascontiguousarray(samples[:1], dtype=np.float32)
+
     old_idx = np.linspace(0.0, 1.0, num=old_len, endpoint=True)
     new_idx = np.linspace(0.0, 1.0, num=new_len, endpoint=True)
     resampled = np.interp(new_idx, old_idx, samples)
     return np.ascontiguousarray(resampled, dtype=np.float32)
 
 
-def read_audio(path: str, allow_resample: bool):
-    try:
-        samples, sample_rate = sf.read(path, dtype="float32", always_2d=False)
-        if getattr(samples, "ndim", 1) > 1:
-            samples = samples.mean(axis=1)
+def read_audio(path: str, allow_resample: bool) -> np.ndarray:
+    samples, sample_rate = sf.read(path, dtype="float32", always_2d=False)
 
-        samples = np.asarray(samples, dtype=np.float32)
+    if getattr(samples, "ndim", 1) > 1:
+        samples = samples.mean(axis=1)
 
-        if sample_rate != SAMPLE_RATE:
-            if not allow_resample:
-                return (path, False, None, 0, f"Expected {SAMPLE_RATE} Hz, got {sample_rate} Hz")
-            samples = resample_audio(samples, sample_rate, SAMPLE_RATE)
-            sample_rate = SAMPLE_RATE
+    samples = np.asarray(samples, dtype=np.float32)
 
-        samples = np.ascontiguousarray(samples, dtype=np.float32)
-        return (path, True, samples, sample_rate, "")
-    except Exception as e:
-        return (path, False, None, 0, f"{type(e).__name__}: {e}")
+    if sample_rate != SAMPLE_RATE:
+        if not allow_resample:
+            raise ValueError(f"Expected {SAMPLE_RATE} Hz, got {sample_rate} Hz")
+        samples = resample_audio(samples, sample_rate, SAMPLE_RATE)
+
+    return np.ascontiguousarray(samples, dtype=np.float32)
 
 
 def create_recognizer(args: argparse.Namespace, model_paths: dict[str, str]) -> sherpa_onnx.OfflineRecognizer:
@@ -341,134 +315,24 @@ def create_recognizer(args: argparse.Namespace, model_paths: dict[str, str]) -> 
     )
 
 
-class JsonlWriter(threading.Thread):
-    def __init__(self, output_path: str, result_queue: queue.Queue, flush_every: int = 100):
-        super().__init__(name="jsonl-writer", daemon=True)
-        self.output_path = output_path
-        self.result_queue = result_queue
-        self.flush_every = flush_every
-        self.written = 0
-
-    def run(self) -> None:
-        os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
-        with open(self.output_path, "a", encoding="utf-8") as f:
-            while True:
-                item = self.result_queue.get()
-                try:
-                    if item is _SENTINEL:
-                        f.flush()
-                        os.fsync(f.fileno())
-                        return
-                    f.write(item)
-                    self.written += 1
-                    if self.written % self.flush_every == 0:
-                        f.flush()
-                finally:
-                    self.result_queue.task_done()
-
-
-def producer_loop(file_queue: queue.Queue, loaded_queue: queue.Queue, allow_resample: bool) -> None:
-    while True:
-        path = file_queue.get()
+def make_wav_key(path: str, audio_dir: str) -> str:
+    path = os.path.abspath(path)
+    if audio_dir:
+        root = os.path.abspath(os.path.expanduser(audio_dir))
         try:
-            if path is _SENTINEL:
-                loaded_queue.put(_SENTINEL)
-                return
-            loaded_queue.put(read_audio(path, allow_resample))
-        finally:
-            file_queue.task_done()
+            return os.path.relpath(path, root)
+        except ValueError:
+            return os.path.basename(path)
+    return os.path.basename(path)
 
 
-def encode_jsonl_line(wav_path: str, text: str) -> str:
-    return json.dumps(
-        {"wav": os.path.basename(wav_path), "text": text},
+def write_jsonl_line(f, wav_key: str, text: str) -> None:
+    line = json.dumps(
+        {"wav": wav_key, "text": text},
         ensure_ascii=False,
         separators=(",", ":"),
-    ) + "\n"
-
-
-def decode_batch(recognizer: sherpa_onnx.OfflineRecognizer, batch: list[tuple]) -> list[str]:
-    results: list[Optional[str]] = [None] * len(batch)
-    streams = []
-    positions = []
-    paths = []
-
-    for i, item in enumerate(batch):
-        path, ok, samples, sample_rate, error = item
-        if not ok or samples is None:
-            results[i] = encode_jsonl_line(path, "")
-            continue
-
-        s = recognizer.create_stream()
-        s.accept_waveform(sample_rate, samples)
-        streams.append(s)
-        positions.append(i)
-        paths.append(path)
-
-    if streams:
-        recognizer.decode_streams(streams)
-        for i, path, stream in zip(positions, paths, streams):
-            text = stream.result.text.strip()
-            results[i] = encode_jsonl_line(path, text)
-
-    return [x for x in results if x is not None]
-
-
-def inference_loop(
-    recognizer: sherpa_onnx.OfflineRecognizer,
-    loaded_queue: queue.Queue,
-    result_queue: queue.Queue,
-    num_producers: int,
-    batch_size: int,
-    max_wait_ms: float,
-    progress_every: int,
-    quiet: bool,
-) -> int:
-    alive_producers = num_producers
-    max_wait_s = max_wait_ms / 1000.0
-    finished = 0
-
-    while True:
-        batch = []
-
-        while not batch and alive_producers > 0:
-            item = loaded_queue.get()
-            loaded_queue.task_done()
-            if item is _SENTINEL:
-                alive_producers -= 1
-                continue
-            batch.append(item)
-
-        if not batch:
-            break
-
-        deadline = time.perf_counter() + max_wait_s
-        while len(batch) < batch_size:
-            timeout = deadline - time.perf_counter()
-            if timeout <= 0:
-                break
-            try:
-                item = loaded_queue.get(timeout=timeout)
-                loaded_queue.task_done()
-            except queue.Empty:
-                break
-
-            if item is _SENTINEL:
-                alive_producers -= 1
-                if alive_producers <= 0:
-                    break
-                continue
-            batch.append(item)
-
-        lines = decode_batch(recognizer, batch)
-        for line in lines:
-            result_queue.put(line)
-
-        finished += len(lines)
-        if (not quiet) and finished % progress_every == 0:
-            print(f"[progress] finished={finished}", flush=True)
-
-    return finished
+    )
+    f.write(line + "\n")
 
 
 def main() -> int:
@@ -479,22 +343,28 @@ def main() -> int:
         print("No input files found.", file=sys.stderr)
         return 2
 
+    done = set()
     if args.resume:
         done = load_done_set(args.output)
-        if done:
-            files = [p for p in files if os.path.basename(p) not in done]
+
+    filtered_files = []
+    for p in files:
+        wav_key = make_wav_key(p, args.audio_dir)
+        if wav_key not in done:
+            filtered_files.append(p)
+
+    files = filtered_files
 
     if not files:
         print("Nothing to do.")
         return 0
 
     if not args.quiet:
-        print(
-            f"Discovered {len(files)} files | read_workers={args.read_workers} | "
-            f"recognizer_threads={args.num_threads} | batch_size={args.batch_size}",
-            flush=True,
-        )
+        print(f"Discovered: {len(files)} file(s)", flush=True)
+        print(f"Recognizer threads: {args.num_threads}", flush=True)
+        print(f"Output: {args.output}", flush=True)
 
+    t0 = time.perf_counter()
     model_paths = download_model(
         quantize=args.quantize,
         cache_dir=args.cache_dir,
@@ -502,73 +372,61 @@ def main() -> int:
         local_files_only=args.local_files_only,
     )
     recognizer = create_recognizer(args, model_paths)
+    if not args.quiet:
+        print(f"Model ready in {time.perf_counter() - t0:.2f}s", flush=True)
 
-    file_queue: queue.Queue = queue.Queue(maxsize=max(args.loaded_queue_size, args.read_workers * 2))
-    loaded_queue: queue.Queue = queue.Queue(maxsize=args.loaded_queue_size)
-    result_queue: queue.Queue = queue.Queue(maxsize=max(args.batch_size * 16, 256))
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
-    writer = JsonlWriter(args.output, result_queue, flush_every=args.flush_every)
-    writer.start()
-
-    producers = []
-    for idx in range(args.read_workers):
-        t = threading.Thread(
-            target=producer_loop,
-            name=f"reader-{idx}",
-            args=(file_queue, loaded_queue, args.allow_resample),
-            daemon=True,
-        )
-        t.start()
-        producers.append(t)
-
-    for path in files:
-        file_queue.put(path)
-    for _ in producers:
-        file_queue.put(_SENTINEL)
-
+    total = len(files)
+    ok_count = 0
+    err_count = 0
     started = time.perf_counter()
 
-    finished = inference_loop(
-        recognizer=recognizer,
-        loaded_queue=loaded_queue,
-        result_queue=result_queue,
-        num_producers=len(producers),
-        batch_size=args.batch_size,
-        max_wait_ms=args.max_wait_ms,
-        progress_every=args.progress_every,
-        quiet=args.quiet,
+    with open(args.output, "a", encoding="utf-8") as fout:
+        for idx, path in enumerate(files, 1):
+            wav_key = make_wav_key(path, args.audio_dir)
+            file_start = time.perf_counter()
+
+            try:
+                samples = read_audio(path, args.allow_resample)
+
+                stream = recognizer.create_stream()
+                stream.accept_waveform(SAMPLE_RATE, samples)
+                recognizer.decode_streams([stream])
+
+                text = stream.result.text.strip()
+                write_jsonl_line(fout, wav_key, text)
+                ok_count += 1
+                status = "ok"
+
+            except Exception as e:
+                write_jsonl_line(fout, wav_key, "")
+                err_count += 1
+                status = f"err: {type(e).__name__}: {e}"
+
+            if idx % args.flush_every == 0:
+                fout.flush()
+                os.fsync(fout.fileno())
+
+            if not args.quiet:
+                elapsed_file = time.perf_counter() - file_start
+                print(
+                    f"[{idx}/{total}] {wav_key} | {status} | {elapsed_file:.2f}s",
+                    flush=True,
+                )
+
+            elif idx % args.progress_every == 0:
+                print(f"[progress] {idx}/{total}", flush=True)
+
+    total_elapsed = time.perf_counter() - started
+    print(
+        f"Finished | total={total} ok={ok_count} err={err_count} time={total_elapsed:.2f}s",
+        flush=True,
     )
-
-    file_queue.join()
-    loaded_queue.join()
-
-    result_queue.put(_SENTINEL)
-    result_queue.join()
-    writer.join()
-
-    for t in producers:
-        t.join(timeout=0.1)
-
-    elapsed = time.perf_counter() - started
-    if not args.quiet:
-        print(f"Finished {finished} files in {elapsed:.2f}s", flush=True)
-        print(f"Output: {args.output}", flush=True)
-
-    return 0
+    return 0 if ok_count > 0 else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
-
-
-
-# python infer_onnx_bulk_min.py \
-#   --audio-dir data \
-#   --recursive \
-#   --extensions .wav \
-#   --quantize int8 \
-#   --batch-size 16 \
-#   --allow-resample \
-#   --output results.jsonl \
-#   --resume
+# python infer_onnx_bulk.py --audio-dir data --recursive --extensions .wav --quantize int8 --allow-resample --output results.jsonl --quiet
