@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     out.add_argument("--output", type=str, default="results.jsonl")
     out.add_argument("--resume", action="store_true")
     out.add_argument("--flush-every", type=positive_int, default=1)
-    out.add_argument("--progress-every", type=positive_int, default=10)
+    out.add_argument("--progress-every", type=positive_int, default=100)
     out.add_argument("--quiet", action="store_true")
 
     args = parser.parse_args()
