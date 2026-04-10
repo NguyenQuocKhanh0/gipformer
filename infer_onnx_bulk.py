@@ -311,7 +311,7 @@ def create_recognizer(args: argparse.Namespace, model_paths: dict[str, str]) -> 
         feature_dim=FEATURE_DIM,
         decoding_method=args.decoding_method,
         max_active_paths=args.max_active_paths,
-        provider="cpu",
+        provider="cuda",
     )
 
 
