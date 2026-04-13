@@ -309,115 +309,115 @@ def load_done_set(output_path: str) -> set[str]:
 # Model
 # ---------------------------
 
-# def download_model(quantize: str, cache_dir: str = "", mode: str = "snapshot", local_files_only: bool = False) -> dict[str, str]:
-#     files = ONNX_FILES[quantize]
-#     wanted = list(files.values()) + ["tokens.txt"]
-#     cache_dir = cache_dir or None
-
-#     if mode == "snapshot":
-#         repo_dir = snapshot_download(
-#             repo_id=REPO_ID,
-#             allow_patterns=wanted,
-#             cache_dir=cache_dir,
-#             max_workers=min(8, len(wanted)),
-#             local_files_only=local_files_only,
-#         )
-#         repo_dir = str(repo_dir)
-#         out = {k: str(Path(repo_dir) / v) for k, v in files.items()}
-#         out["tokens"] = str(Path(repo_dir) / "tokens.txt")
-#         return out
-
-#     out: dict[str, str] = {}
-#     for k, filename in files.items():
-#         out[k] = hf_hub_download(
-#             repo_id=REPO_ID,
-#             filename=filename,
-#             cache_dir=cache_dir,
-#             local_files_only=local_files_only,
-#         )
-#     out["tokens"] = hf_hub_download(
-#         repo_id=REPO_ID,
-#         filename="tokens.txt",
-#         cache_dir=cache_dir,
-#         local_files_only=local_files_only,
-#     )
-#     return out
-import os
-import subprocess
-from pathlib import Path
-from urllib.parse import quote
-
-
-def _wget_file(repo_id: str, filename: str, out_path: Path, token: str | None = None) -> str:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # encode từng phần path để tránh lỗi với tên file có ký tự đặc biệt
-    encoded_filename = "/".join(quote(part) for part in filename.split("/"))
-    url = f"https://huggingface.co/{repo_id}/resolve/main/{encoded_filename}"
-
-    cmd = [
-        "wget",
-        "-O",
-        str(out_path),
-        url,
-    ]
-
-    # Nếu repo private thì truyền token
-    if token:
-        cmd[1:1] = ["--header", f"Authorization: Bearer {token}"]
-
-    subprocess.run(cmd, check=True)
-    return str(out_path)
-
-
-def download_model(
-    quantize: str,
-    cache_dir: str = "",
-    mode: str = "snapshot",
-    local_files_only: bool = False,
-    hf_token: str | None = None,
-) -> dict[str, str]:
+def download_model(quantize: str, cache_dir: str = "", mode: str = "snapshot", local_files_only: bool = False) -> dict[str, str]:
     files = ONNX_FILES[quantize]
     wanted = list(files.values()) + ["tokens.txt"]
+    cache_dir = cache_dir or None
 
-    # Thư mục lưu local
-    if cache_dir:
-        repo_dir = Path(cache_dir) / REPO_ID.replace("/", "--")
-    else:
-        repo_dir = Path("./hf_downloads") / REPO_ID.replace("/", "--")
+    if mode == "snapshot":
+        repo_dir = snapshot_download(
+            repo_id=REPO_ID,
+            allow_patterns=wanted,
+            cache_dir=cache_dir,
+            max_workers=min(8, len(wanted)),
+            local_files_only=local_files_only,
+        )
+        repo_dir = str(repo_dir)
+        out = {k: str(Path(repo_dir) / v) for k, v in files.items()}
+        out["tokens"] = str(Path(repo_dir) / "tokens.txt")
+        return out
 
     out: dict[str, str] = {}
-
-    # local_files_only: chỉ lấy file đã có sẵn, không tải
-    if local_files_only:
-        for k, filename in files.items():
-            file_path = repo_dir / filename
-            if not file_path.exists():
-                raise FileNotFoundError(f"Thiếu file local: {file_path}")
-            out[k] = str(file_path)
-
-        tokens_path = repo_dir / "tokens.txt"
-        if not tokens_path.exists():
-            raise FileNotFoundError(f"Thiếu file local: {tokens_path}")
-        out["tokens"] = str(tokens_path)
-        return out
-
-    # mode="snapshot": tải toàn bộ file về repo_dir
-    if mode == "snapshot":
-        for filename in wanted:
-            _wget_file(REPO_ID, filename, repo_dir / filename, token=hf_token)
-
-        for k, filename in files.items():
-            out[k] = str(repo_dir / filename)
-        out["tokens"] = str(repo_dir / "tokens.txt")
-        return out
-
-    # mode khác: vẫn tải từng file bằng wget
     for k, filename in files.items():
-        out[k] = _wget_file(REPO_ID, filename, repo_dir / filename, token=hf_token)
-
-    out["tokens"] = _wget_file(REPO_ID, "tokens.txt", repo_dir / "tokens.txt", token=hf_token)
+        out[k] = hf_hub_download(
+            repo_id=REPO_ID,
+            filename=filename,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+    out["tokens"] = hf_hub_download(
+        repo_id=REPO_ID,
+        filename="tokens.txt",
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
+    )
     return out
+# import os
+# import subprocess
+# from pathlib import Path
+# from urllib.parse import quote
+
+
+# def _wget_file(repo_id: str, filename: str, out_path: Path, token: str | None = None) -> str:
+#     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+#     # encode từng phần path để tránh lỗi với tên file có ký tự đặc biệt
+#     encoded_filename = "/".join(quote(part) for part in filename.split("/"))
+#     url = f"https://huggingface.co/{repo_id}/resolve/main/{encoded_filename}"
+
+#     cmd = [
+#         "wget",
+#         "-O",
+#         str(out_path),
+#         url,
+#     ]
+
+#     # Nếu repo private thì truyền token
+#     if token:
+#         cmd[1:1] = ["--header", f"Authorization: Bearer {token}"]
+
+#     subprocess.run(cmd, check=True)
+#     return str(out_path)
+
+
+# def download_model(
+#     quantize: str,
+#     cache_dir: str = "",
+#     mode: str = "snapshot",
+#     local_files_only: bool = False,
+#     hf_token: str | None = None,
+# ) -> dict[str, str]:
+#     files = ONNX_FILES[quantize]
+#     wanted = list(files.values()) + ["tokens.txt"]
+
+#     # Thư mục lưu local
+#     if cache_dir:
+#         repo_dir = Path(cache_dir) / REPO_ID.replace("/", "--")
+#     else:
+#         repo_dir = Path("./hf_downloads") / REPO_ID.replace("/", "--")
+
+#     out: dict[str, str] = {}
+
+#     # local_files_only: chỉ lấy file đã có sẵn, không tải
+#     if local_files_only:
+#         for k, filename in files.items():
+#             file_path = repo_dir / filename
+#             if not file_path.exists():
+#                 raise FileNotFoundError(f"Thiếu file local: {file_path}")
+#             out[k] = str(file_path)
+
+#         tokens_path = repo_dir / "tokens.txt"
+#         if not tokens_path.exists():
+#             raise FileNotFoundError(f"Thiếu file local: {tokens_path}")
+#         out["tokens"] = str(tokens_path)
+#         return out
+
+#     # mode="snapshot": tải toàn bộ file về repo_dir
+#     if mode == "snapshot":
+#         for filename in wanted:
+#             _wget_file(REPO_ID, filename, repo_dir / filename, token=hf_token)
+
+#         for k, filename in files.items():
+#             out[k] = str(repo_dir / filename)
+#         out["tokens"] = str(repo_dir / "tokens.txt")
+#         return out
+
+#     # mode khác: vẫn tải từng file bằng wget
+#     for k, filename in files.items():
+#         out[k] = _wget_file(REPO_ID, filename, repo_dir / filename, token=hf_token)
+
+#     out["tokens"] = _wget_file(REPO_ID, "tokens.txt", repo_dir / "tokens.txt", token=hf_token)
+#     return out
 
 # ---------------------------
 # Audio
